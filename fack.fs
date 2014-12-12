@@ -31,77 +31,78 @@ type Env =
       UrlScheme : string
       Body : HttpBody }
 
-type private Ctx = HttpListenerContext
 type Response = Response of int * Map<string,string> * HttpBody 
 type Application = Env -> Async<Response>
 type Middleware = Application -> Application
 
-let private requestMethod (req : HttpListenerRequest) =
-    match req.HttpMethod.ToLower() with
-    | "get"     -> Get     | "post"   -> Post
-    | "put"     -> Put     | "delete" -> Delete
-    | "options" -> Options | "trace"  -> Trace
-    | "connect" -> Connect | h        -> Custom h
+module Host =
+    type private Ctx = HttpListenerContext
+    let private requestMethod (req : HttpListenerRequest) =
+        match req.HttpMethod.ToLower() with
+        | "get"     -> Get     | "post"   -> Post
+        | "put"     -> Put     | "delete" -> Delete
+        | "options" -> Options | "trace"  -> Trace
+        | "connect" -> Connect | h        -> Custom h
 
-let private nvkMap (nvk : Collections.Specialized.NameValueCollection) =
-    nvk.AllKeys
-    |> Array.fold (fun s k -> Map.add k (nvk.Get k) s) Map.empty
+    let private nvkMap (nvk : Collections.Specialized.NameValueCollection) =
+        nvk.AllKeys
+        |> Array.fold (fun s k -> Map.add k (nvk.Get k) s) Map.empty
 
-let private toEnv prefix (req : HttpListenerRequest) : Env =
-    { Method = requestMethod req
-      ScriptName = prefix 
-      PathInfo = req.Url.AbsolutePath.Substring(prefix.Length)
-      QueryString = req.Url.Query
-      Server = { Name = req.Url.Host; Port = req.Url.Port }
-      Headers = nvkMap req.Headers
-      UrlScheme = req.Url.Scheme 
-      Body = Stream req.InputStream }
+    let private toEnv prefix (req : HttpListenerRequest) : Env =
+        { Method = requestMethod req
+          ScriptName = prefix 
+          PathInfo = req.Url.AbsolutePath.Substring(prefix.Length)
+          QueryString = req.Url.Query
+          Server = { Name = req.Url.Host; Port = req.Url.Port }
+          Headers = nvkMap req.Headers
+          UrlScheme = req.Url.Scheme 
+          Body = Stream req.InputStream }
 
-let private getContext (ctx : HttpListener) =
-    Async.FromBeginEnd(ctx.BeginGetContext, ctx.EndGetContext)
+    let private getContext (ctx : HttpListener) =
+        Async.FromBeginEnd(ctx.BeginGetContext, ctx.EndGetContext)
 
-let private addHeader (ctx:Ctx) key value =
-    ctx.Response.AddHeader (key, value)
+    let private addHeader (ctx:Ctx) key value =
+        ctx.Response.AddHeader (key, value)
 
-let private writeBody (b: HttpBody) (s: Stream) =
-    async {
-        match b with
-        | Data arr -> do! s.AsyncWrite(arr, 0)
-        | Stream str -> 
-            str.CopyTo(s) } //TODO make async
-
-let private handler prefix (app : Application) (ctx : Ctx) =
-    async {
-        let! res = ctx.Request |> toEnv prefix |> app |> Async.Catch
-        match res with
-        | Choice1Of2 (Response (status, headers, data)) -> 
-            ctx.Response.StatusCode <- status 
-            headers |> Map.iter (addHeader ctx) 
-            do! writeBody data ctx.Response.OutputStream
-        | Choice2Of2 ex ->
-            ctx.Response.StatusCode <- 500
-            ctx.Response.StatusDescription <- ex.Message
-        ctx.Response.Close() }
-
-let receive (app : Application) endpoint =
-    let listener = new HttpListener()
-    listener.Prefixes.Add(endpoint)
-    listener.Start()
-    let epu = Uri (endpoint.Replace("*", "x").Replace("+", "x") )
-    let prefix = epu.AbsolutePath 
-    let rec inner () =
+    let private writeBody (b: HttpBody) (s: Stream) =
         async {
-            let! ctx = getContext listener
-            Async.Start (handler prefix app ctx)
-            return! inner () }
-    inner () 
+            match b with
+            | Data arr -> do! s.AsyncWrite(arr, 0)
+            | Stream str -> 
+                str.CopyTo(s) } //TODO make async
 
-let run (app: Application) endpoint =
-    let cts = new System.Threading.CancellationTokenSource()
-    Async.Start (receive app endpoint, cts.Token)
-    { new IDisposable with
-        member __.Dispose() =
-            cts.Cancel() }
+    let private handler prefix (app : Application) (ctx : Ctx) =
+        async {
+            let! res = ctx.Request |> toEnv prefix |> app |> Async.Catch
+            match res with
+            | Choice1Of2 (Response (status, headers, data)) -> 
+                ctx.Response.StatusCode <- status 
+                headers |> Map.iter (addHeader ctx) 
+                do! writeBody data ctx.Response.OutputStream
+            | Choice2Of2 ex ->
+                ctx.Response.StatusCode <- 500
+                ctx.Response.StatusDescription <- ex.Message
+            ctx.Response.Close() }
+
+    let receive (app : Application) endpoint =
+        let listener = new HttpListener()
+        listener.Prefixes.Add(endpoint)
+        listener.Start()
+        let epu = Uri (endpoint.Replace("*", "x").Replace("+", "x") )
+        let prefix = epu.AbsolutePath 
+        let rec inner () =
+            async {
+                let! ctx = getContext listener
+                Async.Start (handler prefix app ctx)
+                return! inner () }
+        inner () 
+
+    let run (app: Application) endpoint =
+        let cts = new System.Threading.CancellationTokenSource()
+        Async.Start (receive app endpoint, cts.Token)
+        { new IDisposable with
+            member __.Dispose() =
+                cts.Cancel() }
 
 module Util =
     let encode (s: string) = System.Text.Encoding.UTF8.GetBytes s
