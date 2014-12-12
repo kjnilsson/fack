@@ -6,8 +6,6 @@ let app (e: Env) =
     async {
         return Response (200, Map.empty, Data "HELLO WORLD"B) }
 
-run app "http://*:4567/"
-
 open Fack.Ware
 open Fack.Util
 
@@ -17,7 +15,7 @@ let app2 (e: Env) =
         return Response (200, Map.empty, Data data) }
 
 //middleware
-let mapp = urlMap (["^one", app; "^two", app2]) notFound
+let mapp = urlMap (["^/one", app; "^/two", app2]) notFound
 
 let endpoint = "http://*:4567/fack/"
 

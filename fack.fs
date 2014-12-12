@@ -1,4 +1,5 @@
 module Fack
+
 open System
 open System.IO
 open System.Net
@@ -31,27 +32,43 @@ type Env =
       UrlScheme : string
       Body : HttpBody }
 
-type Response = Response of int * Map<string,string> * HttpBody 
+type Response = Response of int * Map<string,string> * HttpBody //status, headers, content
 type Application = Env -> Async<Response>
 type Middleware = Application -> Application
+
+module Util =
+    let encode (s: string) = System.Text.Encoding.UTF8.GetBytes s
+    let decode (data: byte []) = System.Text.Encoding.UTF8.GetString data
+
+    let inline mapQuery (q : string) =
+        match q with
+        | "" -> Map.empty
+        | s ->
+            let skip = if s.StartsWith("?") then 1 else 0
+            s.[skip..].Split([|';'|])
+            |> Array.choose (fun x -> 
+                match x.Split('=') with
+                | [|k;v|] -> Some (k, v)
+                | _ -> None )
+            |> Map.ofArray
 
 module Host =
     type private Ctx = HttpListenerContext
     let private requestMethod (req : HttpListenerRequest) =
-        match req.HttpMethod.ToLower() with
-        | "get"     -> Get     | "post"   -> Post
-        | "put"     -> Put     | "delete" -> Delete
-        | "options" -> Options | "trace"  -> Trace
-        | "connect" -> Connect | h        -> Custom h
+        match req.HttpMethod with
+        | "GET"     -> Get     | "POST"   -> Post
+        | "PUT"     -> Put     | "DELETE" -> Delete
+        | "OPTIONS" -> Options | "TRACE"  -> Trace
+        | "CONNECT" -> Connect | h        -> Custom h
 
     let private nvkMap (nvk : Collections.Specialized.NameValueCollection) =
         nvk.AllKeys
         |> Array.fold (fun s k -> Map.add k (nvk.Get k) s) Map.empty
 
-    let private toEnv prefix (req : HttpListenerRequest) : Env =
+    let inline private toEnv prefix (req : HttpListenerRequest) : Env =
         { Method = requestMethod req
           ScriptName = prefix 
-          PathInfo = req.Url.AbsolutePath.Substring(prefix.Length)
+          PathInfo = "/" + req.Url.AbsolutePath.Substring(prefix.Length)
           QueryString = req.Url.Query
           Server = { Name = req.Url.Host; Port = req.Url.Port }
           Headers = nvkMap req.Headers
@@ -61,15 +78,21 @@ module Host =
     let private getContext (ctx : HttpListener) =
         Async.FromBeginEnd(ctx.BeginGetContext, ctx.EndGetContext)
 
-    let private addHeader (ctx:Ctx) key value =
+    let inline private addHeader (ctx:Ctx) key value =
         ctx.Response.AddHeader (key, value)
 
-    let private writeBody (b: HttpBody) (s: Stream) =
+    let inline private writeBody (b: HttpBody) (s: Stream) =
         async {
             match b with
             | Data arr -> do! s.AsyncWrite(arr, 0)
             | Stream str -> 
                 str.CopyTo(s) } //TODO make async
+
+    let inline private handleContentLength (b : HttpBody) (resp : HttpListenerResponse) =
+        match b with
+        | Data data ->
+            resp.ContentLength64 <- int64 data.Length
+        | _ -> ()
 
     let private handler prefix (app : Application) (ctx : Ctx) =
         async {
@@ -78,6 +101,7 @@ module Host =
             | Choice1Of2 (Response (status, headers, data)) -> 
                 ctx.Response.StatusCode <- status 
                 headers |> Map.iter (addHeader ctx) 
+                handleContentLength data ctx.Response
                 do! writeBody data ctx.Response.OutputStream
             | Choice2Of2 ex ->
                 ctx.Response.StatusCode <- 500
@@ -103,10 +127,6 @@ module Host =
         { new IDisposable with
             member __.Dispose() =
                 cts.Cancel() }
-
-module Util =
-    let encode (s: string) = System.Text.Encoding.UTF8.GetBytes s
-    let decode (data: byte []) = System.Text.Encoding.UTF8.GetString data
 
 module Ware =
     open System.Text.RegularExpressions
