@@ -1,7 +1,7 @@
 ##fack.fs
 ========
 
-rack-esque fsharp utlity around HttpListener
+Single file, "rack-esque" fsharp utility around HttpListener.
 
 ####Installation
 
